@@ -1,0 +1,12 @@
+modules/terminal/*.c
+modules/terminal/*.cpp
+modules/terminal/build
+*.o
+*.d
+*.pyd
+*.pxd
+*.so
+*.tmp
+*.strace
+*.bin
+
