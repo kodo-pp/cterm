@@ -7,9 +7,11 @@ cimport libc.string as string
 cimport posix.fcntl as fcntl
 cimport posix.stdlib as posix_stdlib
 cimport posix.unistd as unistd
+cimport posix.ioctl as ioctl
 cimport libcpp.string as cxx_string
 
 import os
+import sys
 import subprocess as sp
 
 
@@ -19,20 +21,13 @@ cdef extern from '<stdlib.h>' nogil:
     int close(int)
 
 
-def read_fd(fd: int, length: int, complete: bool) -> bytes:
-    n = 0
-    cdef cxx_string.string buf
-    buf.resize(length)
-    while n < length:
-        read_now = unistd.read(fd, <char*>buf.c_str() + <size_t>n, length - n)
-        if read_now <= 0:
-            # I really don't understand wtf is happening when read(2) returns 0, so I'll consider it an error
-            raise OSError(errno.errno, os.strerror(errno.errno))
-        if not complete:
-            buf.resize(read_now)
-            return bytes(buf)
-        n += read_now
-    return bytes(buf)
+cdef extern from '<termios.h>' nogil:
+    enum: TIOCSCTTY
+    enum: TIOCNOTTY
+
+
+def read_fd(fd: int, length: int) -> bytes:
+    return os.read(fd, length)
 
 
 def write_fd(fd: int, data: bytes):
@@ -49,7 +44,7 @@ def write_fd(fd: int, data: bytes):
 
 class Terminal:
     def __init__(self):
-        cdef int tty_fd = fcntl.open('/dev/ptmx', fcntl.O_RDWR)
+        cdef int tty_fd = fcntl.open('/dev/ptmx', fcntl.O_RDWR | os.O_CLOEXEC)
         if tty_fd < 0:
             raise OSError(errno.errno, os.strerror(errno.errno), '/dev/ptmx')
         if posix_stdlib.unlockpt(tty_fd) < 0:
@@ -74,8 +69,8 @@ class Terminal:
         return write_fd(self.tty_fd, data)
 
 
-    def read(self, length, complete=False):
-        return read_fd(self.tty_fd, length, complete)
+    def read(self, length):
+        return read_fd(self.tty_fd, length)
 
 
     def __enter__(self, *a):
@@ -91,6 +86,21 @@ class Terminal:
             raise OSError(errno.errno, os.strerror(errno.errno))
 
 
-    def spawn(self, *args, **kwargs):
-        with open(self.tty_name, 'r+b', buffering=0) as pts:
-            return sp.Popen(*args, **kwargs, stdin=pts, stdout=pts, stderr=pts)
+    def spawn(self, args):
+        pid = os.fork()
+        if pid == 0:
+            # Child process
+            pts_fd = os.open(self.tty_name, os.O_RDWR)
+            with os.fdopen(pts_fd, 'r+b', buffering=0) as pts:
+                #if ioctl.ioctl(pts_fd, TIOCNOTTY) < 0:
+                #    raise OSError(errno.errno, os.strerror(errno.errno))
+                os.setsid()
+                if ioctl.ioctl(pts_fd, TIOCSCTTY, 0) < 0:
+                    raise OSError(errno.errno, os.strerror(errno.errno))
+                os.dup2(pts_fd, 0)
+                os.dup2(pts_fd, 1)
+                os.dup2(pts_fd, 2)
+                os.execv(args[0], args)
+        else:
+            # Parent process
+            return pid
